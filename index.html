@@ -191,7 +191,10 @@
       catch (e) { return fallback; }
     }
     function saveJSON(key, value) {
-      try { localStorage.setItem(key, JSON.stringify(value)); }
+      try {
+        if (value == null) localStorage.removeItem(key);
+        else localStorage.setItem(key, JSON.stringify(value));
+      }
       catch (e) { setStatus("浏览器存储已满，未能写入本地。", true); }
     }
     function nowId() { return Date.now().toString(36) + Math.floor(Math.random() * 4096).toString(36); }
@@ -644,6 +647,22 @@
       renderMergeList();
     }
 
+    function cleanMergeSession(raw, versionPool) {
+      if (!raw || typeof raw !== "object" || !raw.a || !raw.b || raw.a === raw.b) return null;
+      const va = versionPool.find(v => v.id === String(raw.a));
+      const vb = versionPool.find(v => v.id === String(raw.b));
+      if (!va || !vb || va.cols !== vb.cols || va.rows !== vb.rows) return null;
+      // 只保留真实冲突格上的取值，其余以默认取A补齐，防止脏数据或尺寸变化导致错位
+      const diffIdx = computeDiff(va, vb).diffIdx;
+      const incoming = raw.resolutions && typeof raw.resolutions === "object" ? raw.resolutions : {};
+      const resolutions = defaultResolutions(diffIdx);
+      for (const i of diffIdx) {
+        const choice = incoming[i] || (typeof i === "number" ? incoming[String(i)] : null);
+        if (choice === "A" || choice === "B") resolutions[i] = choice;
+      }
+      return { a: va.id, b: vb.id, resolutions };
+    }
+
     /* ---------- 状态提示 ---------- */
     let statusTimer = null;
     function setStatus(msg, isError) {
@@ -669,7 +688,8 @@
         canvas: { cols, rows, cells },
         usage: colors.map((color, i) => ({ color, count: cells.filter(v => v === i).length })),
         versions,
-        merges
+        merges,
+        mergeSession: session
       };
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const a = document.createElement("a");
@@ -677,7 +697,7 @@
       a.download = `brocade-workspace-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(a.href);
-      setStatus("工作区已导出（含当前画布、全部版本与合并记录），可用“导入还原”完整恢复。", false);
+      setStatus("工作区已导出（含当前画布、全部版本、合并记录与进行中的冲突取舍），可用“导入还原”完整恢复。", false);
     }
     function importWorkspace(file) {
       const reader = new FileReader();
@@ -708,15 +728,18 @@
         document.querySelector("#rows").value = rows;
         versions = newVersions;
         merges = newMerges;
-        session = null;
+        // 还原进行中的合并审改：逐格取舍随文件带回，选中的 A/B 版本必须在本文件版本库中
+        const restoredSession = cleanMergeSession(data.mergeSession, versions);
+        session = restoredSession;
+        activeRegion = null;
         persistCanvas(); persistHistory();
         saveJSON(KEY_VERSIONS, versions);
         saveJSON(KEY_MERGES, merges);
-        saveJSON(KEY_SESSION, null);
-        activeRegion = null;
+        saveJSON(KEY_SESSION, session);
         render();
         renderCollab();
-        setStatus(`工作区已还原：${versions.length} 个版本、${merges.length} 条合并记录。`, false);
+        const sessionHint = restoredSession ? "；进行中的合并取舍已保留，可继续审改" : "";
+        setStatus(`工作区已还原：${versions.length} 个版本、${merges.length} 条合并记录${sessionHint}。`, false);
       };
       reader.onerror = () => setStatus("读取文件失败。", true);
       reader.readAsText(file);
